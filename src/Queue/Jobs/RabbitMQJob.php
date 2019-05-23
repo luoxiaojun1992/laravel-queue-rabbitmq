@@ -2,21 +2,23 @@
 
 namespace VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Jobs;
 
+use DateTimeInterface;
 use Exception;
-use Illuminate\Support\Str;
+use Illuminate\Contracts\Bus\Dispatcher;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Interop\Amqp\AmqpMessage;
 use Illuminate\Queue\Jobs\Job;
 use Interop\Amqp\AmqpConsumer;
-use Illuminate\Queue\Jobs\JobName;
 use Illuminate\Container\Container;
-use Illuminate\Database\DetectsDeadlocks;
 use Illuminate\Contracts\Queue\Job as JobContract;
 use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueue;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Horizon\RabbitMQQueue as HorizonRabbitMQQueue;
+use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Traits\JobHandler;
+use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Traits\QueueJobMapping;
 
 class RabbitMQJob extends Job implements JobContract
 {
-    use DetectsDeadlocks;
+    use JobHandler;
+    use QueueJobMapping;
 
     /**
      * Same as RabbitMQQueue, used for attempt counts.
@@ -26,12 +28,15 @@ class RabbitMQJob extends Job implements JobContract
     protected $connection;
     protected $consumer;
     protected $message;
+    protected $config;
+    protected $job;
 
     public function __construct(
         Container $container,
         RabbitMQQueue $connection,
         AmqpConsumer $consumer,
-        AmqpMessage $message
+        AmqpMessage $message,
+        $config
     ) {
         $this->container = $container;
         $this->connection = $connection;
@@ -39,6 +44,171 @@ class RabbitMQJob extends Job implements JobContract
         $this->message = $message;
         $this->queue = $consumer->getQueue()->getQueueName();
         $this->connectionName = $connection->getConnectionName();
+        $this->config = $config;
+
+        $jobClass = $this->getJobClass();
+        $this->job = new $jobClass($this->getData());
+        $this->job->queue = $this->getQueueNameWithoutPrefix();
+        if ($this->job instanceof \VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Jobs\Job) {
+            $this->job->topic = $this->message->getRoutingKey();
+            $this->job->exchange = $this->message->getExchangeName();
+        }
+    }
+
+    protected function getQueueNameWithoutPrefix()
+    {
+        $queueName = $this->queue;
+        $queueNamePrefix = $this->config['queue_name_prefix'] ?? null;
+        if ($queueNamePrefix) {
+            $queueName = substr($queueName, strlen($queueNamePrefix) + 1);
+        }
+
+        return $queueName;
+    }
+
+    /**
+     * @return mixed|string
+     */
+    protected function getData()
+    {
+        $data = $this->getRawBody();
+        $dataArr = json_decode($data, true);
+        if (!json_last_error()) {
+            $data = $dataArr;
+        }
+
+        return $data;
+    }
+
+    /**
+     * Get the decoded body of the job.
+     *
+     * @return array
+     */
+    public function payload()
+    {
+        return [
+            'displayName' => $this->getDisplayName($this->job),
+            'job' => 'Illuminate\Queue\CallQueuedHandler@call',
+            'maxTries' => $this->maxTries(),
+            'timeout' => $this->timeout(),
+            'timeoutAt' => $this->getJobExpiration($this->job),
+            'data' => [
+                'commandName' => get_class($this->job),
+                'command' => serialize(clone $this->job),
+            ],
+        ];
+    }
+
+    /**
+     * Get the number of times to attempt a job.
+     *
+     * @return int|null
+     */
+    public function maxTries()
+    {
+        return $this->job->tries ?? null;
+    }
+
+    /**
+     * Get the number of seconds to delay a failed job before retrying it.
+     *
+     * @return int|null
+     */
+    public function delaySeconds()
+    {
+        $delayTo = $this->message->getProperty('delay_to');
+        if (!is_null($delayTo)) {
+            return intval($delayTo) - time();
+        }
+
+        return null;
+    }
+
+    /**
+     * Get the number of seconds the job can run.
+     *
+     * @return int|null
+     */
+    public function timeout()
+    {
+        return $this->job->timeout ?? null;
+    }
+
+    /**
+     * Get the expiration timestamp for an object-based queue handler.
+     *
+     * @param  mixed  $job
+     * @return mixed
+     */
+    protected function getJobExpiration($job)
+    {
+        if (! method_exists($job, 'retryUntil') && ! isset($job->timeoutAt)) {
+            return;
+        }
+
+        $expiration = $job->timeoutAt ?? $job->retryUntil();
+
+        return $expiration instanceof DateTimeInterface
+            ? $expiration->getTimestamp() : $expiration;
+    }
+
+    /**
+     * Get the display name for the given job.
+     *
+     * @param  mixed  $job
+     * @return string
+     */
+    protected function getDisplayName($job)
+    {
+        return method_exists($job, 'displayName')
+            ? $job->displayName() : get_class($job);
+    }
+
+    /**
+     * Get the timestamp indicating when the job should timeout.
+     *
+     * @return int|null
+     */
+    public function timeoutAt()
+    {
+        return $this->getJobExpiration($this->job);
+    }
+
+    /**
+     * Get the name of the queued job class.
+     *
+     * @return string
+     */
+    public function getName()
+    {
+        return 'Illuminate\Queue\CallQueuedHandler@call';
+    }
+
+    /**
+     * Get the name of the queued job class.
+     *
+     * @return string
+     */
+    public function getJobClass()
+    {
+        return $this->getJobByQueueName(
+            $this->getQueueNameWithoutPrefix(),
+            $this->config,
+            $this->message->getRoutingKey()
+        );
+    }
+
+    /**
+     * Get the resolved name of the queued job class.
+     *
+     * Resolves the name of "wrapped" jobs such as class-based handlers.
+     *
+     * @return string
+     */
+    public function resolveName()
+    {
+        return $this->getDisplayName($this->job);
     }
 
     /**
@@ -50,24 +220,26 @@ class RabbitMQJob extends Job implements JobContract
      */
     public function fire(): void
     {
+        /** @var Dispatcher $dispatcher */
+        $dispatcher = $this->resolve(Dispatcher::class);
+
         try {
-            $payload = $this->payload();
+            $command = $this->setJobInstanceIfNecessary($this->job);
+        } catch (ModelNotFoundException $e) {
+            $this->handleModelNotFound($e);
+            return;
+        }
 
-            [$class, $method] = JobName::parse($payload['job']);
+        $dispatcher->dispatchNow(
+            $command, $this->resolveHandler($command)
+        );
 
-            with($this->instance = $this->resolve($class))->{$method}($this, $payload['data']);
-        } catch (Exception $exception) {
-            if (
-                $this->causedByDeadlock($exception) ||
-                Str::contains($exception->getMessage(), ['detected deadlock'])
-            ) {
-                sleep(2);
-                $this->fire();
+        if (!$this->hasFailed() && !$this->isReleased()) {
+            $this->ensureNextJobInChainIsDispatched($command);
+        }
 
-                return;
-            }
-
-            throw $exception;
+        if (!$this->isDeletedOrReleased()) {
+            $this->delete();
         }
     }
 
@@ -94,49 +266,53 @@ class RabbitMQJob extends Job implements JobContract
         return $this->message->getBody();
     }
 
-    /** {@inheritdoc} */
+    /**
+     * {@inheritdoc}
+     */
     public function delete(): void
     {
         parent::delete();
 
         $this->consumer->acknowledge($this->message);
+    }
 
-        // required for Laravel Horizon
-        if ($this->connection instanceof HorizonRabbitMQQueue) {
-            $this->connection->deleteReserved($this->queue, $this);
+    /**
+     * Process an exception that caused the job to fail.
+     *
+     * @param  \Exception  $e
+     * @return void
+     */
+    public function failed($e)
+    {
+        $this->markAsFailed();
+
+        if (method_exists($this->job, 'failed')) {
+            $this->job->failed($e);
         }
     }
 
-    /** {@inheritdoc}
+    /**
+     * {@inheritdoc}
      * @throws Exception
+     * @throws \Interop\Queue\Exception
      */
     public function release($delay = 0): void
     {
         parent::release($delay);
 
-        $this->delete();
-
-        $body = $this->payload();
-
-        /*
-         * Some jobs don't have the command set, so fall back to just sending it the job name string
-         */
-        if (isset($body['data']['command']) === true) {
-            $job = $this->unserialize($body);
-        } else {
-            $job = $this->getName();
+        if ($delay > 0) {
+            $this->consumer->acknowledge($this->message);
+            $this->connection->later($delay, $this->job, $this->job->data, $this->job->queue);
+            return;
         }
 
-        $data = $body['data'];
-
-        $this->connection->release($delay, $job, $data, $this->getQueue(), $this->attempts() + 1);
+        $this->consumer->reject($this->message, true);
     }
 
     /**
      * Get the job identifier.
      *
      * @return string
-     * @throws \Interop\Queue\Exception
      */
     public function getJobId(): string
     {
@@ -153,33 +329,5 @@ class RabbitMQJob extends Job implements JobContract
     public function setJobId($id): void
     {
         $this->connection->setCorrelationId($id);
-    }
-
-    /**
-     * Unserialize job.
-     *
-     * @param array $body
-     *
-     * @throws Exception
-     *
-     * @return mixed
-     */
-    protected function unserialize(array $body)
-    {
-        try {
-            /* @noinspection UnserializeExploitsInspection */
-            return unserialize($body['data']['command']);
-        } catch (Exception $exception) {
-            if (
-                $this->causedByDeadlock($exception) ||
-                Str::contains($exception->getMessage(), ['detected deadlock'])
-            ) {
-                sleep(2);
-
-                return $this->unserialize($body);
-            }
-
-            throw $exception;
-        }
     }
 }
