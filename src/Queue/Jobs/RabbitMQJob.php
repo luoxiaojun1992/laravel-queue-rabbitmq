@@ -273,7 +273,9 @@ class RabbitMQJob extends Job implements JobContract
     {
         parent::delete();
 
-        $this->consumer->acknowledge($this->message);
+        if (!$this->isAutoAck()) {
+            $this->consumer->acknowledge($this->message);
+        }
     }
 
     /**
@@ -292,6 +294,18 @@ class RabbitMQJob extends Job implements JobContract
     }
 
     /**
+     * @return bool
+     */
+    protected function isAutoAck()
+    {
+        $queueOptions = $this->config['options']['queue'];
+        $queueName = $this->getQueueNameWithoutPrefix();
+        return $queueOptions['auto_delete'] ||
+            (isset($queueOptions['optionsMapping'][$queueName]['auto_delete']) &&
+                $queueOptions['optionsMapping'][$queueName]['auto_delete']);
+    }
+
+    /**
      * {@inheritdoc}
      * @throws Exception
      * @throws \Interop\Queue\Exception
@@ -300,13 +314,21 @@ class RabbitMQJob extends Job implements JobContract
     {
         parent::release($delay);
 
+        $isAutoAck = $this->isAutoAck();
+
         if ($delay > 0) {
-            $this->consumer->acknowledge($this->message);
+            if (!$isAutoAck) {
+                $this->consumer->acknowledge($this->message);
+            }
             $this->connection->later($delay, $this->job, $this->job->data, $this->job->queue);
             return;
         }
 
-        $this->consumer->reject($this->message, true);
+        if (!$isAutoAck) {
+            $this->consumer->reject($this->message, true);
+        } else {
+            $this->connection->push($this->job, $this->job->data, $this->job->queue);
+        }
     }
 
     /**
