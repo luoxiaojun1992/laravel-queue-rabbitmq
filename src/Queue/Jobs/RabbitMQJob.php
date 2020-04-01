@@ -308,7 +308,7 @@ class RabbitMQJob extends Job implements JobContract
     /**
      * {@inheritdoc}
      * @throws Exception
-     * @throws \Interop\Queue\Exception
+     * @throws \Throwable
      */
     public function release($delay = 0): void
     {
