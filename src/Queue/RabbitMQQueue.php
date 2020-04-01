@@ -583,7 +583,9 @@ class RabbitMQQueue extends Queue implements QueueContract
             }
             $exchangeName = [$mapping['exchange'] ?? ($this->exchangeOptions['name'] ?: $this->formatDefaultExchangeName($queueName))];
 
-            array_push($exchangeName, $exchangeName[0] . '-delay');
+            if (!empty($mapping['delay'])) {
+                array_push($exchangeName, $exchangeName[0] . '-delay');
+            }
 
             foreach ($exchangeName as $exName) {
                 //Bind Queue To Exchange

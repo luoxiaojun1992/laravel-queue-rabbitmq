@@ -63,6 +63,7 @@ return [
                     [
                         'topic' => 'test_topic', // string or array, default is queue name
                         'exchange' => 'test_exchange', //string, default is global name or queue name
+                        'delay' => false, //boolean whether to consumer from delay exchange
                     ],
                 ],
             ],
