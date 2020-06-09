@@ -38,7 +38,7 @@ return [
 
     'queue_name_prefix' => env('RABBITMQ_QUEUE_NAME_PREFIX'),
 
-    'persisted' => boolval(env('RABBITMQ_PERSISTED', false)), //only for amqp-ext
+    'persisted' => boolval((int)env('RABBITMQ_PERSISTED', false)), //only for amqp-ext
 
     'options' => [
 
@@ -50,7 +50,7 @@ return [
                 ],
             ],
 
-            'retry_on_connect_error' => boolval(env('RABBITMQ_RETRY_ON_CONN_ERROR', true)),
+            'retry_on_connect_error' => boolval((int)env('RABBITMQ_RETRY_ON_CONN_ERROR', true)),
 
             'aggQueue' => [
                 //
