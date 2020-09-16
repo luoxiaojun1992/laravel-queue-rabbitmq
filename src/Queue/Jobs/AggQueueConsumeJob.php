@@ -29,6 +29,7 @@ class AggQueueConsumeJob extends Job
         if ($job instanceof AbstractAggQueueJob) {
             $job->data = $data;
         }
+        $job->setJob($this->job);
 
         return call_user_func([$job, 'handle']);
     }
